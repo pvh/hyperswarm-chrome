@@ -6,6 +6,8 @@ process.hrtime = require('browser-process-hrtime')
 const network = require('@hyperswarm/network')
 const crypto = require('crypto')
 
+const mdns = require('multicast-dns')
+
 // chrome-dgram is not compatible with node dgram in a few ways,
 // usually because chrome-dgram does almost everything asynchronously
 const dgram = require('chrome-dgram')
@@ -14,21 +16,45 @@ const dgram = require('chrome-dgram')
 // it's the turducken of networking.
 const UTP = require('utp-wasm')
 
-let socket = dgram.createSocket('udp4')
-socket.bind(20000)
+let utpSocket = dgram.createSocket('udp4')
+utpSocket.on('listening', function () {
+  setupMDNS(utpSocket)
+})
+utpSocket.bind(20000)
 
-// we give the socket.bind() a second to complete :(
-setTimeout(() => {
+function setupMDNS(utpSocket) {
+  /* here's our multicast DNS socket */
+  const mdnsSocket = dgram.createSocket('udp4')
+
+  mdnsSocket.setMulticastTTL(255)
+  mdnsSocket.setMulticastLoopback(true)
+
+  chrome.system.network.getNetworkInterfaces((ifaces) => {
+    mdnsSocket.on('listening', function () {
+      for (let i = 0; i < ifaces.length; i++) {
+        if (ifaces[i].prefixLength == 24) {
+          mdnsSocket.addMembership('224.0.0.251', ifaces[i].address)
+        }
+      }
+      setTimeout(() => run(utpSocket, mdnsSocket), 2000)
+    })
+    mdnsSocket.bind(5352)
+  })
+}
+function run(utpSocket, mdnsSocket) {
   // this won't work for you until you fix the export UTP line (i sent a PR) 
-  let utp = UTP({ socket })
+  let utp = UTP({ socket: utpSocket })
   // there's a PR for this too
   utp.address = () => utp.socket.address()
 
   // this had better show a port or you'll have more problems soon
-  console.log('address', utp.address())
+  console.log('address', utpSocket.address())
+
+
+  const multicast = mdns({socket: mdnsSocket, bind: false, port: 5300, multicast: false})
 
   // i had to implement options passing here, i'm sure you can see how
-  const net = network({socket: utp, ephemeral: false})
+  const net = network({socket: utp, multicast, ephemeral: false})
 
   // look for peers listed under this topic
   const topic = crypto.createHash('sha256')
@@ -51,4 +77,5 @@ setTimeout(() => {
     process.stdin.pipe(socket).pipe(process.stdout)
   })
 
-}, 1000)
+}
+
